@@ -11,7 +11,6 @@ namespace TestRunner
     {
         static async Task Main()
         {
-            Console.WriteLine("=== CUSTOM TEST RUNNER: STREAMING SERVICE ===\n");
 
             var assembly = typeof(CinemaTests.CinemaBusinessTests).Assembly;
             var testClasses = assembly.GetTypes()

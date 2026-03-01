@@ -11,6 +11,8 @@ namespace CinemaTests
         private BillingService _billing;
         private User _testUser;
 
+        private static SharedContext _context = new SharedContext();
+
         [Before]
         public void Init()
         {
@@ -22,10 +24,9 @@ namespace CinemaTests
         public void TestRegionalPricing()
         {
             decimal price = _billing.CalculatePrice(SubscriptionType.Premium, "US");
-            Assert.AreEqual(24m, price); 
-            Assert.IsInRange((double)price, 20, 30); 
+            Assert.AreEqual(24m, price);
+            Assert.IsInRange((double)price, 20, 30);
         }
-
         [TestCase(SubscriptionType.Premium, "EU", 22.0)]
         [TestCase(SubscriptionType.Standard, "RU", 10.0)]
         [TestCase(SubscriptionType.Free, "RU", 0.0)]
@@ -40,12 +41,11 @@ namespace CinemaTests
         public void TestRestrictions()
         {
             var movie = new Movie { Title = "R-Rated", MinAge = 18 };
-            Assert.IsTrue(_billing.CanWatch(_testUser, movie)); 
+            Assert.IsTrue(_billing.CanWatch(_testUser, movie));
 
             _testUser.Age = 10;
-            Assert.IsFalse(_billing.CanWatch(_testUser, movie)); 
+            Assert.IsFalse(_billing.CanWatch(_testUser, movie));
         }
-
         [TestMethod("Тест лимита устройств (Провальный)")]
         public void TestDeviceLimitFail()
         {
@@ -59,7 +59,7 @@ namespace CinemaTests
         {
             decimal price = _billing.ApplyPromoCode("SAVE50", 100m);
             Assert.AreEqual(50m, price);
-            Assert.AreNotEqual(100m, price); 
+            Assert.AreNotEqual(100m, price);
         }
 
         [TestMethod("Асинхронная оплата")]
@@ -81,21 +81,40 @@ namespace CinemaTests
         [TestMethod("Проверки типов и строк")]
         public void TestTypesAndStrings()
         {
-            Assert.IsNotNull(_testUser); 
-            Assert.IsInstanceOf<User>(_testUser); 
-            Assert.StringContains("Ali", _testUser.Name); 
+            Assert.IsNotNull(_testUser);
+            Assert.IsInstanceOf<User>(_testUser);
+            Assert.StringContains("Ali", _testUser.Name);
 
             object nullObj = null;
-            Assert.IsNull(nullObj); 
+            Assert.IsNull(nullObj);
         }
 
-        [TestMethod("Тест на содержание строки (Провальный)")]
+        [TestMethod("Тест на содержание строки")]
         public void TestStringFail()
         {
-            Assert.StringContains("Bob", _testUser.Name); 
+            Assert.StringContains("Bob", _testUser.Name);
+        }
+        [TestMethod("Проверка работы Shared Context")]
+        public void TestSharedContextUsage()
+        {
+            _context.Set("SavedPromoCode", "FREE");
+            _context.Set("TempDiscount", 50m);
+
+            string code = _context.Get<string>("SavedPromoCode");
+            decimal discount = _context.Get<decimal>("TempDiscount");
+
+            string notFound = _context.Get<string>("NonExistentKey");
+
+            Assert.AreEqual("FREE", code);
+            Assert.AreEqual(50m, discount);
+            Assert.IsNull(notFound);
         }
 
         [After]
-        public void Cleanup() => _billing = null;
+        public void Cleanup()
+        {
+            _billing = null;
+            _testUser = null;
+        }
     }
 }
