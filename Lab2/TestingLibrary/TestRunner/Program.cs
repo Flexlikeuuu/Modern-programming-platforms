@@ -19,7 +19,7 @@ namespace TestRunner
             var testClasses = typeof(CinemaTests.CinemaBusinessTests).Assembly.GetTypes()
                 .Where(t => t.IsDefined(typeof(TestClassAttribute))).ToList();
 
-            Console.WriteLine("=== СРАВНЕНИЕ ПРОИЗВОДИТЕЛЬНОСТИ ===\n");
+            Console.WriteLine("=== СРАВНЕНИЕ ===\n");
 
             Console.WriteLine(">>> ЗАПУСК 1: ПОСЛЕДОВАТЕЛЬНЫЙ");
             Stopwatch swSeq = Stopwatch.StartNew();
