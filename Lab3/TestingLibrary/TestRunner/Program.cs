@@ -4,111 +4,18 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
-using System.Threading.Tasks;
 using TestingLibrary;
 using CinemaTests;
 
 namespace TestRunner
 {
-    public class CustomThreadPool : IDisposable
-    {
-        private readonly Queue<Action> _taskQueue = new Queue<Action>();
-        private readonly List<Thread> _workers = new List<Thread>();
-        private readonly int _minThreads;
-        private readonly int _maxThreads;
-        private readonly int _idleTimeoutMs;
-        private bool _stopping = false;
-        private int _activeThreads = 0;
-
-        public int CurrentThreadCount => _workers.Count;
-        public int QueueLength { get { lock (_taskQueue) return _taskQueue.Count; } }
-
-        public CustomThreadPool(int min, int max, int idleMs = 3000)
-        {
-            _minThreads = min;
-            _maxThreads = max;
-            _idleTimeoutMs = idleMs;
-
-            for (int i = 0; i < _minThreads; i++) CreateWorker();
-        }
-
-        public void Execute(Action task)
-        {
-            lock (_taskQueue)
-            {
-                _taskQueue.Enqueue(task);
-                if (_taskQueue.Count > 0 && _workers.Count < _maxThreads)
-                {
-                    CreateWorker();
-                    LogPool($"[POOL] + Масштабирование ВВЕРХ. Потоков: {_workers.Count}");
-                }
-                Monitor.Pulse(_taskQueue);
-            }
-        }
-
-        private void CreateWorker()
-        {
-            var thread = new Thread(WorkerLoop) { IsBackground = true, Name = $"PoolWorker-{Guid.NewGuid().ToString().Substring(0, 4)}" };
-            _workers.Add(thread);
-            thread.Start();
-        }
-
-        private void WorkerLoop()
-        {
-            while (true)
-            {
-                Action task = null;
-                lock (_taskQueue)
-                {
-                    while (_taskQueue.Count == 0 && !_stopping)
-                    {
-                        if (!Monitor.Wait(_taskQueue, _idleTimeoutMs))
-                        {
-                            if (_workers.Count > _minThreads)
-                            {
-                                _workers.Remove(Thread.CurrentThread);
-                                LogPool($"[POOL] - Сжатие (простой). Потоков: {_workers.Count}");
-                                return;
-                            }
-                        }
-                    }
-                    if (_stopping && _taskQueue.Count == 0) return;
-                    if (_taskQueue.Count > 0) task = _taskQueue.Dequeue();
-                }
-
-                if (task != null)
-                {
-                    Interlocked.Increment(ref _activeThreads);
-                    try { task(); }
-                    catch (Exception ex) { LogPool($"[POOL ERROR] {ex.Message}"); }
-                    Interlocked.Decrement(ref _activeThreads);
-                }
-            }
-        }
-
-        private void LogPool(string msg)
-        {
-            lock (Console.Out)
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine(msg);
-                Console.ResetColor();
-            }
-        }
-
-        public void Dispose()
-        {
-            lock (_taskQueue) { _stopping = true; Monitor.PulseAll(_taskQueue); }
-        }
-    }
-
     class Program
     {
         private static readonly object _consoleLock = new object();
         private static int _passed, _failed;
         private static CustomThreadPool _pool;
 
-        static async Task Main()
+        static void Main()
         {
             Console.Title = "Custom ThreadPool Test Runner";
 
@@ -127,20 +34,20 @@ namespace TestRunner
             Console.WriteLine(">>> ЭТАП 1: ПИКОВАЯ НАГРУЗКА (30 тестов)");
             for (int i = 0; i < 30; i++) _pool.Execute(allTests[i % allTests.Count]);
 
-            await Task.Delay(2000);
+            WaitForQueueEmpty(2000);
 
             Console.WriteLine("\n>>> ЭТАП 2: ОЖИДАНИЕ БЕЗДЕЙСТВИЯ (сжатие пула)...");
-            await Task.Delay(5000);
+            Thread.Sleep(5000);
 
             Console.WriteLine("\n>>> ЭТАП 3: РЕДКИЕ ЗАДАЧИ (подача каждые 200мс)");
             for (int i = 0; i < 25; i++)
             {
                 _pool.Execute(allTests[i % allTests.Count]);
-                await Task.Delay(200);
+                Thread.Sleep(200);
             }
 
-            while (_pool.QueueLength > 0) await Task.Delay(500);
-            await Task.Delay(1000);
+            WaitForQueueEmpty(500);
+            Thread.Sleep(1000);
 
             sw.Stop();
 
@@ -151,9 +58,20 @@ namespace TestRunner
             Console.WriteLine($"Провалено: {_failed}");
             Console.WriteLine($"Общее время: {sw.ElapsedMilliseconds} ms");
             Console.WriteLine($"Текущих потоков в пуле: {_pool.CurrentThreadCount}");
+            Console.WriteLine($"Очередь задач: {_pool.QueueLength}");
             Console.WriteLine(new string('=', 60));
+
+            _pool.Dispose();
             Console.WriteLine("Нажмите любую клавишу для выхода...");
             Console.ReadKey();
+        }
+
+        private static void WaitForQueueEmpty(int checkIntervalMs)
+        {
+            while (_pool.QueueLength > 0)
+            {
+                Thread.Sleep(checkIntervalMs);
+            }
         }
 
         private static List<Action> PrepareTestList(List<Type> classes)
@@ -185,17 +103,55 @@ namespace TestRunner
             string name = $"{method.Name}{(tc != null ? "(" + string.Join(",", tc.Params) + ")" : "")}";
             var timeoutAttr = method.GetCustomAttribute<TimeoutAttribute>();
 
+            Exception testException = null;
+            bool completed = false;
+            bool timedOut = false;
+
             try
             {
                 bef?.Invoke(instance, null);
 
-                var task = Task.Run(async () => {
-                    var res = method.Invoke(instance, tc?.Params);
-                    if (res is Task t) await t;
+                var completedEvent = new ManualResetEvent(false);
+                Exception executionException = null;
+
+                var testThread = new Thread(() =>
+                {
+                    try
+                    {
+                        var res = method.Invoke(instance, tc?.Params);
+                        if (res is Task task)
+                        {
+                            task.GetAwaiter().GetResult();
+                        }
+                        completed = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        executionException = ex;
+                    }
+                    finally
+                    {
+                        completedEvent.Set();
+                    }
                 });
 
+                testThread.IsBackground = true;
+                testThread.Start();
+
                 int timeout = timeoutAttr?.Milliseconds ?? 5000;
-                if (!task.Wait(timeout)) throw new TestingException($"Timeout {timeout}ms");
+                bool waitCompleted = completedEvent.WaitOne(timeout);
+
+                if (!waitCompleted)
+                {
+                    timedOut = true;
+                    testThread.Interrupt();
+                    throw new TestingException($"Timeout {timeout}ms");
+                }
+
+                if (executionException != null)
+                {
+                    throw executionException;
+                }
 
                 aft?.Invoke(instance, null);
 
@@ -206,6 +162,10 @@ namespace TestRunner
             {
                 Interlocked.Increment(ref _failed);
                 var message = ex.InnerException?.Message ?? ex.Message;
+                if (timedOut)
+                {
+                    message = $"Timeout {timeoutAttr?.Milliseconds ?? 5000}ms";
+                }
                 Log(ConsoleColor.Red, "FAIL", $"{name}: {message}");
             }
         }

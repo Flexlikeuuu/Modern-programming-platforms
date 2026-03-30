@@ -7,102 +7,106 @@ namespace TestRunner
     public class CustomThreadPool : IDisposable
     {
         private readonly Queue<Action> _taskQueue = new Queue<Action>();
-        private readonly List<WorkerThread> _threads = new List<WorkerThread>();
+        private readonly List<Thread> _workers = new List<Thread>();
 
         private readonly int _minThreads;
         private readonly int _maxThreads;
         private readonly int _idleTimeoutMs;
-        private bool _disposed = false;
+        private bool _stopping = false;
 
-        public int CurrentThreadCount => _threads.Count;
-        public int QueueLength => _taskQueue.Count;
+        public int CurrentThreadCount { get { lock (_taskQueue) return _workers.Count; } }
+        public int QueueLength { get { lock (_taskQueue) return _taskQueue.Count; } }
 
-        public CustomThreadPool(int minThreads, int maxThreads, int idleTimeoutMs = 5000)
+        public CustomThreadPool(int min, int max, int idleMs = 3000)
         {
-            _minThreads = minThreads;
-            _maxThreads = maxThreads;
-            _idleTimeoutMs = idleTimeoutMs;
+            _minThreads = min;
+            _maxThreads = max;
+            _idleTimeoutMs = idleMs;
 
-            for (int i = 0; i < _minThreads; i++)
-                CreateWorker();
+            lock (_taskQueue)
+            {
+                for (int i = 0; i < _minThreads; i++) CreateWorker();
+            }
         }
 
         public void Execute(Action task)
         {
             lock (_taskQueue)
             {
-                _taskQueue.Enqueue(task);
-                Monitor.Pulse(_taskQueue);
+                if (_stopping) return;
 
-                if (_taskQueue.Count > 0 && _threads.Count < _maxThreads)
+                _taskQueue.Enqueue(task);
+
+                if (_taskQueue.Count > 0 && _workers.Count < _maxThreads)
                 {
                     CreateWorker();
-                    Console.WriteLine($"[POOL] Масштабирование ВВЕРХ: {_threads.Count} потоков");
+                    LogPool($"[POOL] + Масштабирование ВВЕРХ. Потоков: {_workers.Count}");
                 }
+
+                Monitor.Pulse(_taskQueue);
             }
         }
 
         private void CreateWorker()
         {
-            var worker = new WorkerThread(this);
-            _threads.Add(worker);
-            worker.Start();
+            var thread = new Thread(WorkerLoop)
+            {
+                IsBackground = true,
+                Name = $"PoolWorker-{Guid.NewGuid().ToString().Substring(0, 4)}"
+            };
+            _workers.Add(thread);
+            thread.Start();
         }
 
-        private class WorkerThread
+        private void WorkerLoop()
         {
-            private readonly CustomThreadPool _pool;
-            private readonly Thread _thread;
-            private DateTime _lastWorkTime;
-
-            public WorkerThread(CustomThreadPool pool)
+            while (true)
             {
-                _pool = pool;
-                _thread = new Thread(Run) { IsBackground = true };
-                _lastWorkTime = DateTime.Now;
-            }
-
-            public void Start() => _thread.Start();
-
-            private void Run()
-            {
-                while (true)
+                Action task = null;
+                lock (_taskQueue)
                 {
-                    Action task = null;
-                    lock (_pool._taskQueue)
+                    while (_taskQueue.Count == 0 && !_stopping)
                     {
-                        while (_pool._taskQueue.Count == 0)
+                        if (!Monitor.Wait(_taskQueue, _idleTimeoutMs))
                         {
-                            if (!_pool._disposed && Monitor.Wait(_pool._taskQueue, _pool._idleTimeoutMs))
-                                continue;
-
-                            if (_pool._threads.Count > _pool._minThreads || _pool._disposed)
+                            if (_workers.Count > _minThreads)
                             {
-                                _pool._threads.Remove(this);
-                                Console.WriteLine($"[POOL] Сжатие: поток завершен. Осталось: {_pool._threads.Count}");
-                                return;
+                                _workers.Remove(Thread.CurrentThread);
+                                LogPool($"[POOL] - Сжатие (простой). Потоков: {_workers.Count}");
+                                return; 
                             }
                         }
-                        task = _pool._taskQueue.Dequeue();
                     }
 
-                    try
-                    {
-                        task?.Invoke();
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[POOL ERROR] Ошибка в потоке: {ex.Message}");
-                    }
-                    _lastWorkTime = DateTime.Now;
+                    if (_stopping && _taskQueue.Count == 0) return;
+                    if (_taskQueue.Count > 0) task = _taskQueue.Dequeue();
                 }
+
+                if (task != null)
+                {
+                    try { task(); }
+                    catch (Exception ex) { LogPool($"[POOL ERROR] {ex.Message}"); }
+                }
+            }
+        }
+
+        private void LogPool(string msg)
+        {
+            lock (Console.Out)
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+                Console.ResetColor();
             }
         }
 
         public void Dispose()
         {
-            _disposed = true;
-            lock (_taskQueue) Monitor.PulseAll(_taskQueue);
+            lock (_taskQueue)
+            {
+                _stopping = true;
+                Monitor.PulseAll(_taskQueue);
+            }
         }
     }
 }
